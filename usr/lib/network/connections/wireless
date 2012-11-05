@@ -1,0 +1,116 @@
+#! /bin/bash
+. /usr/lib/network/network
+. "$SUBR_DIR/8021x"
+. "$SUBR_DIR/rfkill"
+
+wireless_up() {
+    PROFILE="$1"
+    load_profile "$PROFILE"
+
+    # Default settings
+    SECURITY=${SECURITY:-none}
+    WPA_DRIVER=${WPA_DRIVER:-nl80211,wext}
+
+    enable_rf $INTERFACE $RFKILL $RFKILL_NAME || return 1
+
+    # Check if interface exists
+    is_interface "$INTERFACE" || { report_fail "interface $INTERFACE does not exist"; return 1; }
+
+    # Kill any lingering wpa_supplicants.
+    stop_wpa "$INTERFACE" &> /dev/null
+
+    # Start wpa_supplicant
+    if [[ "$SECURITY" = "wpa-config" ]]; then
+        WPA_CONF="${WPA_CONF:-/etc/wpa_supplicant.conf}"
+    else
+        WPA_CONF=$(make_wpa_config_file $INTERFACE)
+    fi
+    report_debug wireless_up start_wpa "$INTERFACE" "$WPA_CONF" "$WPA_DRIVER" "$WPA_OPTS"
+    if ! start_wpa "$INTERFACE" "$WPA_CONF" "$WPA_DRIVER" "$WPA_OPTS"; then
+        report_fail "wpa_supplicant did not start, possible configuration error"
+        return 1
+    fi
+
+    # Scan for network's existence first
+    if checkyesno "${SCAN:-no}"; then
+        report_debug wireless_up scanning
+        local OLDESSID="$ESSID"
+        if [[ -n "$AP" ]]; then
+            BSSID=$(wpa_find_ap "$INTERFACE" "$AP")
+        else
+            ESSID=$(wpa_find_essid "$INTERFACE" "$ESSID")
+        fi
+        if [[ $? -gt 0 ]]; then
+            report_fail "Wireless network \"$OLDESSID\" not present."
+            report_debug wireless_up stop_wpa "$INTERFACE"
+            stop_wpa "$INTERFACE"
+            return 1
+        fi
+    fi
+
+    # Build configuration file
+    case "$SECURITY" in
+        wpa-config)
+            ;;
+        none|wep|wpa|wpa-configsection)
+            printf "%s\n" "network={" "$(make_wpa_config)" "}" >> "$WPA_CONF"
+            report_debug wireless_up "Configuration generated at $WPA_CONF"
+            report_debug wireless_up wpa_reconfigure "$INTERFACE"
+            if ! wpa_reconfigure "$INTERFACE"; then
+                report_fail "WPA configuration failed!"
+                stop_wpa "$INTERFACE"
+                return 1
+            fi
+            ;;
+        *)
+            report_fail "Invalid SECURITY setting: $SECURITY"
+            ;;
+    esac
+
+    # Bring interface up after starting wpa_supplicant
+    # This is important since cards such as iwl3945 do not support
+    # mode switching when they are already up.
+    report_debug wireless_up ifup
+    bring_interface up "$INTERFACE" || return 1
+
+    report_debug wireless_up wpa_check
+    if ! wpa_check "$INTERFACE" "$TIMEOUT"; then
+        report_fail "WPA Authentication/Association Failed"
+        return 1
+    fi
+
+    if ! "$CONN_DIR/ethernet" up "$PROFILE"; then
+        wireless_down "$PROFILE" YES
+        return 1
+    fi
+}
+
+# wireless_down PROFILE [ LEAVE ifconfig up? default no ]
+wireless_down() {
+    local PROFILE="$1"
+    load_profile "$PROFILE"
+
+    "$CONN_DIR/ethernet" down "$PROFILE"
+
+    # The config file can contain a non-standard control socket path
+    if [[ "$SECURITY" = "wpa-config" ]]; then
+        WPA_CONF="${WPA_CONF:-/etc/wpa_supplicant.conf}"
+    fi
+    report_debug wireless_down stop_wpa "$INTERFACE"
+    stop_wpa "$INTERFACE"
+    rm -rf "$STATE_DIR/wpa.$INTERFACE"
+
+    bring_interface down "$INTERFACE"
+
+    # Handle wireless kill switches
+    # Any reason why a hardware switch should be considered on interface down?
+    if [[ "$RFKILL" == "soft" ]]; then
+        set_rf_state "$INTERFACE" disabled $RFKILL_NAME || return 1
+    fi
+}
+
+wireless_$1 "$2" "$3"
+exit $?
+
+# vim: ft=sh ts=4 et sw=4 tw=0:
+

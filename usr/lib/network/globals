@@ -1,0 +1,136 @@
+# /usr/lib/networks/globals
+#
+# All +x files in /usr/lib/network/hooks will be sourced when this file is.
+# Hook files can override any of the utility functions defined here for custom
+# behavior (such as logging error messages to syslog). This lets us keep netcfg
+# simple but gives it the flexibility for users to make modular use of it to do
+# more complex things
+
+
+### Globals
+PROFILE_DIR="/etc/network.d"
+IFACE_DIR="$PROFILE_DIR/interfaces"
+SUBR_DIR="/usr/lib/network"
+HOOKS_DIR="$SUBR_DIR/hooks"
+CONN_DIR="$SUBR_DIR/connections"
+STATE_DIR="/run/network"
+
+
+
+### Logging/Error reporting
+
+function report_err {
+    echo "$*"
+}
+
+function report_notice {
+    echo "$*"
+}
+
+function report_debug {
+    checkyesno "$NETCFG_DEBUG" && echo "DEBUG: $*" >&2
+}
+
+function report_try {
+    # This needs -n and a trailing space.
+    echo -n ":: $* "
+    REPORT_TRYING=1
+}
+
+function report_fail {
+    if [[ -n "$*" ]]; then
+        if (( REPORT_TRYING )); then
+            echo "- $* [fail]"
+            REPORT_TRYING=
+        else
+            echo "$*"
+        fi
+    elif (( REPORT_TRYING )); then
+        echo "[fail]"
+        REPORT_TRYING=
+    fi
+}
+
+function report_success {
+    if [[ -n "$*" ]]; then
+        # This needs -n and a trailing space.
+        echo -n "- $* "
+    fi
+    echo "[done]"
+    REPORT_TRYING=
+}
+
+### For calling scripts only; don't use in library functions
+function exit_stderr { echo "$*" >&2; exit 1; }
+function exit_err { report_err "$*"; exit 1; }
+function exit_fail { report_fail "$*"; exit 1; }
+
+
+### From FreeBSD's /etc/rc.subr
+##
+# checkyesno var
+#    Test $1 variable, and warn if not set to YES or NO.
+#    Return 0 if it's "yes" (et al), nonzero otherwise.
+#    To default to yes, do: "checkyesno ${VAR:-yes}".
+#
+function checkyesno() {
+    local _value="$1"
+    #debug "checkyesno: $1 is set to $_value."
+    case "$_value" in
+
+        #    "yes", "true", "on", or "1"
+    [Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|[Oo][Nn]|1)
+        return 0
+        ;;
+
+        #    "no", "false", "off", or "0"
+    [Nn][Oo]|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff]|0)
+        return 1
+        ;;
+    *)
+        #warn "\$${1} is not set properly - see rc.conf(5)."
+        return 1
+        ;;
+    esac
+}
+
+## Check if variable is a member of an array
+# $1: the variable to find
+# $2...: the array elements
+function inarray() {
+    local item search="$1"
+    shift
+    for item in "$@"; do
+        if [[ "$item" == "$search" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+## Waits until a statement succeeds or a timeout occurs
+# $1: timeout in seconds
+# $2...: condition command
+function timeout_wait() {
+    local timeout="$1"
+    (( timeout *= 10 ))
+    shift
+    while ! eval "$*"; do
+        (( timeout-- > 0 )) || return 1
+        sleep 0.1
+    done
+    return 0
+}
+
+
+### Load all +x files in $HOOKS_DIR
+function load_hooks() {
+    local hook
+    for hook in $(find -L "$HOOKS_DIR/" -maxdepth 1 -type f -executable | sort -u); do
+        source "$hook"
+    done
+}
+
+load_hooks
+
+# vim: ft=sh ts=4 et sw=4:
